@@ -1,0 +1,231 @@
+# This Shows Readme Section. Specifically For the Pipeline Analysis of Differentially Expressed Genes (DEGs) from Microarray Data
+
+#PART A. CONCEPT INTRODUCTION
+#Gene expression analysis compares gene expression levels
+#between two biological conditions (Tumor vs Normal).
+#In this module, we use the limma approach
+#(Linear Models for Microarray Data), 
+#which is the gold standard method for microarray analysis.
+
+#PART B. ENVIRONMENT SETUP (INSTALL & LOAD PACKAGES)
+#Install BiocManager if not available
+if (!require("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+#Install Bioconductor packages
+BiocManager::install(c("GEOquery", "limma"), ask = FALSE, update = FALSE)
+
+#Install annotation package for GPL96 platform
+BiocManager::install("hgu133a.db", ask = FALSE, update = FALSE)
+
+#Install CRAN packages for visualization
+install.packages(c("pheatmap", "ggplot2", "dplyr"))
+
+#Install UMAP if needed
+if (!requireNamespace("umap", quietly = TRUE)) {
+  install.packages("umap")
+}
+
+#Load libraries
+library(GEOquery)
+library(limma)
+library(pheatmap)
+library(ggplot2)
+library(dplyr)
+library(hgu133a.db)
+library(AnnotationDbi)
+library(umap)
+
+#PART C. DOWNLOAD DATA FROM GEO
+#Download GSE15852 dataset
+gset <- getGEO("GSE15852", GSEMatrix = TRUE, AnnotGPL = TRUE)[[1]]
+
+#PART D. EXPRESSION DATA PRE-PROCESSING
+#Extract expression matrix
+ex <- exprs(gset)
+
+#Check if log2 transformation is required
+qx <- as.numeric(quantile(ex, c(0, 0.25, 0.5, 0.75, 0.99, 1), na.rm = TRUE))
+LogTransform <- (qx[5] > 100) ||
+  (qx[6] - qx[1] > 50 && qx[2] > 0)
+if (LogTransform) {
+  ex[ex <= 0] <- NA
+  ex <- log2(ex)
+}
+
+#PART E. DEFINE SAMPLE GROUPS
+#Inspect metadata column names first
+colnames(pData(gset))
+
+#For GSE15852, condition information is typically in:
+group_info <- pData(gset)[["source_name_ch1"]]
+
+#Convert to valid R names
+groups <- make.names(group_info)
+
+#Convert to factor
+gset$group <- factor(groups)
+
+# View detected groups
+levels(gset$group)
+
+# PART F. DESIGN MATRIX
+design <- model.matrix(~0 + gset$group)
+
+# Set clean column names
+colnames(design) <- levels(gset$group)
+
+# Check column names before defining contrast
+colnames(design)
+
+# Define correct contrast using exact names
+contrast_formula <- "breast.tumor.tissue - normal.breast.tissue"
+
+contrast_matrix <- makeContrasts(
+  contrasts = contrast_formula,
+  levels = design
+)
+
+#PART G. DIFFERENTIAL EXPRESSION ANALYSIS (LIMMA)
+fit <- lmFit(ex, design)
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2)
+topTableResults <- topTable(
+  fit2,
+  adjust = "fdr",
+  sort.by = "B",
+  number = Inf,
+  p.value = 0.01
+)
+
+head(topTableResults)
+
+#PART H. GENE ANNOTATION
+probe_ids <- rownames(topTableResults)
+gene_annotation <- AnnotationDbi::select(
+  hgu133a.db,
+  keys = probe_ids,
+  columns = c("SYMBOL", "GENENAME"),
+  keytype = "PROBEID"
+)
+topTableResults$PROBEID <- rownames(topTableResults)
+topTableResults <- merge(
+  topTableResults,
+  gene_annotation,
+  by = "PROBEID",
+  all.x = TRUE
+)
+head(topTableResults[, c("PROBEID", "SYMBOL", "GENENAME")])
+
+#PART I.1 EXPRESSION DISTRIBUTION BOXPLOT
+group_colors <- as.numeric(gset$group)
+boxplot(
+  ex,
+  col = group_colors,
+  las = 2,
+  outline = FALSE,
+  main = "Expression Distribution per Sample",
+  ylab = "Expression Value (log2)"
+)
+legend(
+  "topright",
+  legend = levels(gset$group),
+  fill = unique(group_colors),
+  cex = 0.8
+)
+
+expr_long <- data.frame(
+ Expression = as.vector(ex),
+ Group = rep(gset$group, each = nrow(ex))
+ )
+ggplot(expr_long, aes(x = Expression, color = Group)) +
+ geom_density(linewidth = 1) +
+ theme_minimal() +
+ labs(
+ title = "Gene Expression Distribution",
+ x = "Expression Value (log2)",
+ y = "Density"
+ )
+
+#PART I.2 DENSITY PLOT
+expr_long <- data.frame(
+  Expression = as.vector(ex),
+  Group = rep(gset$group, each = nrow(ex))
+)
+ggplot(expr_long, aes(x = Expression, color = Group)) +
+  geom_density(linewidth = 1) +
+  theme_minimal() +
+  labs(
+    title = "Gene Expression Distribution",
+    x = "Expression Value (log2)",
+    y = "Density"
+  )
+
+#PART I.3 UMAP VISUALIZATION
+umap_input <- t(ex)
+umap_result <- umap(umap_input)
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[, 1],
+  UMAP2 = umap_result$layout[, 2],
+  Group = gset$group
+)
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "UMAP Plot of Samples",
+    x = "UMAP 1",
+    y = "UMAP 2"
+  )
+
+#PART J.1 VOLCANO PLOT
+volcano_data <- data.frame(
+  logFC = topTableResults$logFC,
+  adj.P.Val = topTableResults$adj.P.Val,
+  Gene = topTableResults$SYMBOL
+)
+volcano_data$status <- "NO"
+volcano_data$status[volcano_data$logFC > 1 & volcano_data$adj.P.Val < 0.01] <- "UP"
+volcano_data$status[volcano_data$logFC < -1 & volcano_data$adj.P.Val < 0.01] <- "DOWN"
+ggplot(volcano_data, aes(x = logFC, y = -log10(adj.P.Val), color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue", "NO" = "grey", "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal() +
+  ggtitle("Volcano Plot - Breast Cancer DEG")
+
+#PART J.2 HEATMAP (TOP 50 GENES)
+topTableResults <- topTableResults[order(topTableResults$adj.P.Val), ]
+top50 <- head(topTableResults, 50)
+mat_heatmap <- ex[top50$PROBEID, ]
+gene_label <- ifelse(
+  is.na(top50$SYMBOL) | top50$SYMBOL == "",
+  top50$PROBEID,
+  top50$SYMBOL
+)
+rownames(mat_heatmap) <- gene_label
+mat_heatmap <- mat_heatmap[rowSums(is.na(mat_heatmap)) == 0, ]
+gene_variance <- apply(mat_heatmap, 1, var)
+mat_heatmap <- mat_heatmap[gene_variance > 0, ]
+annotation_col <- data.frame(Group = gset$group)
+rownames(annotation_col) <- colnames(mat_heatmap)
+pheatmap(
+  mat_heatmap,
+  scale = "row",
+  annotation_col = annotation_col,
+  show_colnames = FALSE,
+  fontsize_row = 7,
+  main = "Top 50 Differentially Expressed Genes"
+)
+
+#PART K. SAVE RESULTS
+write.csv(topTableResults, "GSE15852_DEG_results.csv")
+message("Analysis completed. DEG results file has been saved.")
+
+
+
+
+
+
